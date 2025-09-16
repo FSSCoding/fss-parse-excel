@@ -11,7 +11,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries, coordinate_to_tuple, get_column_letter
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 
-from .converters import SafetyConfig, FileSafetyManager
+from converters import SafetyConfig, FileSafetyManager
 
 class CellManager:
     """

@@ -4,7 +4,7 @@
 
 Part of the **FSS Parsers** collection - individual parser tools with the `fss-parse-*` CLI prefix for comprehensive spreadsheet operations.
 
-A comprehensive, professional-grade Excel manipulation toolkit designed for CLI agents and automated workflows. Built with the same architectural excellence as the Word parser.
+A comprehensive, professional-grade Excel manipulation toolkit designed for CLI agents and automated workflows. **Completely standalone** - no dependencies on other FSS parsers.
 
 ## 🎯 Features
 

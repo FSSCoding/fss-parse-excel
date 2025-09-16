@@ -14,11 +14,11 @@ from rich.console import Console
 from rich.table import Table
 from rich.progress import track
 
-from .cell_manager import CellManager
-from .sheet_manager import SheetManager
-from .table_manager import TableManager
-from .query_engine import QueryEngine
-from .converters import ExcelConverter, ConversionConfig, SafetyConfig
+from cell_manager import CellManager
+from sheet_manager import SheetManager
+from table_manager import TableManager
+from query_engine import QueryEngine
+from converters import ExcelConverter, ConversionConfig, SafetyConfig
 
 console = Console()
 

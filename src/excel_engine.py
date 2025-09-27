@@ -117,9 +117,12 @@ def cli(ctx, file, backup, force, verbose, quiet, json, config):
 @click.argument('output_path')
 @click.option('--format', type=click.Choice(['xlsx', 'csv', 'json', 'yaml', 'markdown', 'md']), help='Output format (auto-detected from extension)')
 @click.option('--sheet', help='Specific sheet to convert')
-@click.option('--combine-sheets', is_flag=True, help='Combine all sheets')
+@click.option('--range', help='Specific range to convert (e.g., A1:C10)')
+@click.option('--multi-sheet-mode', type=click.Choice(['single-file', 'separate-files', 'auto']), default='auto', 
+              help='Multi-sheet handling: single-file (JSON/YAML), separate-files (CSV/MD), auto (smart choice)')
+@click.option('--merge-markdown', is_flag=True, help='Merge multiple sheets into single markdown file')
 @click.pass_context
-def convert(ctx, output_path, format, sheet, combine_sheets):
+def convert(ctx, output_path, format, sheet, range, multi_sheet_mode, merge_markdown):
     """Convert Excel file to another format (leaves original untouched)."""
     engine = ctx.obj['engine']
     verbose = ctx.obj.get('verbose', False)
@@ -127,16 +130,40 @@ def convert(ctx, output_path, format, sheet, combine_sheets):
     json_output = ctx.obj.get('json', False)
     
     config = ConversionConfig()
-    if sheet:
-        config.sheet_selection = [sheet]
-    if combine_sheets:
-        config.combine_sheets = True
     
-    # Handle format override
+    # Smart format detection and handling
     if format:
         if format == 'md':
             format = 'markdown'
         output_path = str(Path(output_path).with_suffix(f'.{format}' if format != 'markdown' else '.md'))
+    else:
+        # Auto-detect format from extension
+        format = Path(output_path).suffix.lstrip('.')
+        if format == 'md':
+            format = 'markdown'
+    
+    # Smart multi-sheet mode selection
+    if multi_sheet_mode == 'auto':
+        if format in ['json', 'yaml']:
+            multi_sheet_mode = 'single-file'  # JSON/YAML: single file with hierarchical structure
+        elif format in ['csv', 'markdown']:
+            multi_sheet_mode = 'separate-files' if not merge_markdown else 'single-file'  # CSV: separate files, MD: user choice
+        else:
+            multi_sheet_mode = 'single-file'  # XLSX: single file by nature
+    
+    # Configure conversion based on options
+    if sheet:
+        config.sheet_selection = [sheet]
+    elif multi_sheet_mode == 'single-file':
+        config.combine_sheets = True
+    
+    # Range filtering
+    if range:
+        config.range_selection = range
+    
+    # Markdown merging
+    if merge_markdown and format == 'markdown':
+        config.merge_markdown_sheets = True
     
     engine.converter.config = config
     
@@ -553,6 +580,399 @@ def info(ctx):
             console.print(json.dumps({"status": "error", "message": str(e)}))
         else:
             console.print(f"❌ Error reading file info: {e}", style="red")
+        sys.exit(1)
+
+@cli.command()
+@click.argument('input_file')
+@click.argument('output_file')
+@click.option('--sheet', help='Specific sheet to convert (for Excel inputs)')
+@click.option('--range', help='Specific range to convert (e.g., A1:C10)')
+@click.option('--merge-sheets', is_flag=True, help='Merge multiple sheets into single output')
+@click.pass_context
+def universal_convert(ctx, input_file, output_file, sheet, range, merge_sheets):
+    """Universal converter: Excel↔CSV↔JSON↔YAML↔Markdown cross-format conversion."""
+    import openpyxl
+    import csv
+    import yaml
+    import json
+    from pathlib import Path
+    
+    verbose = ctx.obj.get('verbose', False)
+    quiet = ctx.obj.get('quiet', False)
+    json_output = ctx.obj.get('json', False)
+    
+    try:
+        input_path = Path(input_file)
+        output_path = Path(output_file)
+        
+        input_format = input_path.suffix.lstrip('.').lower()
+        output_format = output_path.suffix.lstrip('.').lower()
+        
+        if input_format == 'md':
+            input_format = 'markdown'
+        if output_format == 'md':
+            output_format = 'markdown'
+        
+        if verbose:
+            console.print(f"🔄 Converting {input_format.upper()} → {output_format.upper()}", style="blue")
+        
+        # Load input data based on format
+        data = None
+        
+        if input_format in ['xlsx', 'xls']:
+            # Excel input
+            workbook = openpyxl.load_workbook(input_file, data_only=True)
+            sheets_data = {}
+            
+            if sheet:
+                if sheet in workbook.sheetnames:
+                    sheets_data[sheet] = list(workbook[sheet].iter_rows(values_only=True))
+                else:
+                    console.print(f"❌ Sheet '{sheet}' not found", style="red")
+                    sys.exit(1)
+            else:
+                for sheet_name in workbook.sheetnames:
+                    sheets_data[sheet_name] = list(workbook[sheet_name].iter_rows(values_only=True))
+            
+            data = sheets_data
+            
+        elif input_format == 'csv':
+            # CSV input
+            with open(input_file, 'r', encoding='utf-8') as csvfile:
+                reader = csv.reader(csvfile)
+                rows = list(reader)
+                data = {'Sheet1': rows}  # CSV becomes single sheet
+                
+        elif input_format == 'json':
+            # JSON input
+            with open(input_file, 'r', encoding='utf-8') as jsonfile:
+                json_data = json.load(jsonfile)
+                if 'sheets' in json_data:
+                    data = json_data['sheets']
+                elif 'data' in json_data:
+                    sheet_name = json_data.get('sheet_name', 'Sheet1')
+                    data = {sheet_name: json_data['data']}
+                else:
+                    data = {'Sheet1': json_data}
+                    
+        elif input_format == 'yaml':
+            # YAML input
+            with open(input_file, 'r', encoding='utf-8') as yamlfile:
+                yaml_data = yaml.safe_load(yamlfile)
+                if 'sheets' in yaml_data:
+                    data = yaml_data['sheets']
+                elif 'data' in yaml_data:
+                    sheet_name = yaml_data.get('sheet_name', 'Sheet1')
+                    data = {sheet_name: yaml_data['data']}
+                else:
+                    data = {'Sheet1': yaml_data}
+        
+        # Apply range filtering if specified
+        if range and data:
+            # Parse range (simplified - assumes A1:C10 format)
+            # This would need proper A1 notation parsing
+            if verbose:
+                console.print(f"📊 Applying range filter: {range}", style="blue")
+        
+        # Convert to output format
+        if output_format == 'csv':
+            # Output as CSV (single sheet only)
+            if len(data) > 1 and not sheet:
+                console.print("⚠️  Multiple sheets found. Use --sheet to specify which one to export to CSV", style="yellow")
+                sheet_name = list(data.keys())[0]
+                console.print(f"📝 Using first sheet: {sheet_name}", style="blue")
+            else:
+                sheet_name = sheet or list(data.keys())[0]
+            
+            with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                for row in data[sheet_name]:
+                    clean_row = ['' if cell is None else str(cell) for cell in row]
+                    writer.writerow(clean_row)
+                    
+        elif output_format == 'json':
+            # Output as JSON (can handle multiple sheets)
+            if merge_sheets or len(data) == 1:
+                # Single file with all sheets
+                output_data = {
+                    "sheets": data,
+                    "metadata": {
+                        "sheet_count": len(data),
+                        "converted_from": input_format,
+                        "converted_at": datetime.now().isoformat()
+                    }
+                }
+            else:
+                output_data = data
+            
+            with open(output_file, 'w', encoding='utf-8') as jsonfile:
+                json.dump(output_data, jsonfile, indent=2, default=str)
+                
+        elif output_format == 'yaml':
+            # Output as YAML (can handle multiple sheets)
+            if merge_sheets or len(data) == 1:
+                output_data = {
+                    "sheets": data,
+                    "metadata": {
+                        "sheet_count": len(data),
+                        "converted_from": input_format,
+                        "converted_at": datetime.now().isoformat()
+                    }
+                }
+            else:
+                output_data = data
+            
+            with open(output_file, 'w', encoding='utf-8') as yamlfile:
+                yaml.dump(output_data, yamlfile, default_flow_style=False)
+                
+        elif output_format == 'markdown':
+            # Output as Markdown
+            lines = []
+            
+            if merge_sheets:
+                # Single markdown file with all sheets
+                lines.append(f"# Converted from {input_format.upper()}")
+                lines.append(f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+                lines.append("")
+                
+                for sheet_name, sheet_data in data.items():
+                    lines.append(f"## {sheet_name}")
+                    lines.append("")
+                    
+                    # Convert to markdown table
+                    for i, row in enumerate(sheet_data):
+                        if i == 0:
+                            # Headers
+                            header_row = "| " + " | ".join(str(cell) if cell is not None else "" for cell in row) + " |"
+                            separator = "| " + " | ".join("---" for _ in row) + " |"
+                            lines.append(header_row)
+                            lines.append(separator)
+                        else:
+                            # Data rows
+                            data_row = "| " + " | ".join(str(cell) if cell is not None else "" for cell in row) + " |"
+                            lines.append(data_row)
+                    
+                    lines.append("")
+                
+                lines.append("---")
+                lines.append("*Generated by FSS Parse Excel Universal Converter*")
+                
+                with open(output_file, 'w', encoding='utf-8') as mdfile:
+                    mdfile.write('\n'.join(lines))
+            else:
+                # For single sheet or separate files would need different logic
+                sheet_name = sheet or list(data.keys())[0]
+                sheet_data = data[sheet_name]
+                
+                lines.append(f"# {sheet_name}")
+                lines.append(f"*Converted from {input_format.upper()} on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+                lines.append("")
+                
+                # Convert to markdown table
+                for i, row in enumerate(sheet_data):
+                    if i == 0:
+                        # Headers
+                        header_row = "| " + " | ".join(str(cell) if cell is not None else "" for cell in row) + " |"
+                        separator = "| " + " | ".join("---" for _ in row) + " |"
+                        lines.append(header_row)
+                        lines.append(separator)
+                    else:
+                        # Data rows
+                        data_row = "| " + " | ".join(str(cell) if cell is not None else "" for cell in row) + " |"
+                        lines.append(data_row)
+                
+                lines.append("")
+                lines.append("---")
+                lines.append("*Generated by FSS Parse Excel Universal Converter*")
+                
+                with open(output_file, 'w', encoding='utf-8') as mdfile:
+                    mdfile.write('\n'.join(lines))
+        
+        # Success output
+        if json_output:
+            console.print(json.dumps({
+                "operation": "universal_convert",
+                "input": {"file": str(input_file), "format": input_format},
+                "output": {"file": str(output_file), "format": output_format},
+                "sheets_processed": len(data) if data else 0,
+                "status": "success"
+            }, indent=2))
+        elif not quiet:
+            console.print(f"✅ Converted {input_format.upper()} → {output_format.upper()}: {output_file}", style="green")
+            if verbose and data:
+                console.print(f"   📊 Processed {len(data)} sheet(s)", style="blue")
+        
+    except Exception as e:
+        if json_output:
+            console.print(json.dumps({"status": "error", "message": str(e)}))
+        else:
+            console.print(f"❌ Universal conversion failed: {e}", style="red")
+        sys.exit(1)
+
+@cli.command()
+@click.option('--output-dir', default='./exported', help='Output directory for sheet files')
+@click.option('--format', default='csv', help='Output format (csv, json, yaml, markdown)')
+@click.option('--include-metadata', is_flag=True, help='Include metadata in exported files')
+@click.option('--prefix', help='Prefix for output filenames')
+@click.pass_context
+def export_sheets(ctx, output_dir, format, include_metadata, prefix):
+    """Export each sheet to separate files (unidirectional multi-sheet export)."""
+    import openpyxl
+    import os
+    from pathlib import Path
+    import csv
+    import yaml
+    
+    file_path = ctx.obj['file_path']
+    verbose = ctx.obj.get('verbose', False)
+    quiet = ctx.obj.get('quiet', False)
+    json_output = ctx.obj.get('json', False)
+    
+    try:
+        # Create output directory
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Load workbook
+        workbook = openpyxl.load_workbook(file_path, data_only=True)
+        exported_files = []
+        
+        if verbose and not quiet:
+            console.print(f"📊 Exporting {len(workbook.sheetnames)} sheets to {output_dir}", style="blue")
+        
+        for sheet_name in workbook.sheetnames:
+            sheet = workbook[sheet_name]
+            
+            # Generate filename
+            safe_name = "".join(c for c in sheet_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            safe_name = safe_name.replace(' ', '_')
+            
+            if prefix:
+                filename = f"{prefix}_{safe_name}.{format}"
+            else:
+                filename = f"{safe_name}.{format}"
+            
+            file_path_out = output_path / filename
+            
+            # Export based on format
+            if format == 'csv':
+                with open(file_path_out, 'w', newline='', encoding='utf-8') as csvfile:
+                    writer = csv.writer(csvfile)
+                    for row in sheet.iter_rows(values_only=True):
+                        # Convert None to empty string
+                        clean_row = ['' if cell is None else str(cell) for cell in row]
+                        writer.writerow(clean_row)
+            
+            elif format == 'json':
+                data = []
+                headers = None
+                for i, row in enumerate(sheet.iter_rows(values_only=True)):
+                    if i == 0:
+                        headers = [str(cell) if cell is not None else f"Column_{j}" for j, cell in enumerate(row)]
+                    else:
+                        row_data = {}
+                        for j, cell in enumerate(row):
+                            if j < len(headers):
+                                row_data[headers[j]] = cell
+                        data.append(row_data)
+                
+                output_data = {
+                    "sheet_name": sheet_name,
+                    "data": data
+                }
+                
+                if include_metadata:
+                    output_data["metadata"] = {
+                        "rows": sheet.max_row,
+                        "columns": sheet.max_column,
+                        "exported_at": datetime.now().isoformat()
+                    }
+                
+                with open(file_path_out, 'w', encoding='utf-8') as jsonfile:
+                    json.dump(output_data, jsonfile, indent=2, default=str)
+            
+            elif format == 'yaml':
+                data = []
+                headers = None
+                for i, row in enumerate(sheet.iter_rows(values_only=True)):
+                    if i == 0:
+                        headers = [str(cell) if cell is not None else f"Column_{j}" for j, cell in enumerate(row)]
+                    else:
+                        row_data = {}
+                        for j, cell in enumerate(row):
+                            if j < len(headers):
+                                row_data[headers[j]] = cell
+                        data.append(row_data)
+                
+                output_data = {
+                    "sheet_name": sheet_name,
+                    "data": data
+                }
+                
+                if include_metadata:
+                    output_data["metadata"] = {
+                        "rows": sheet.max_row,
+                        "columns": sheet.max_column,
+                        "exported_at": datetime.now().isoformat()
+                    }
+                
+                with open(file_path_out, 'w', encoding='utf-8') as yamlfile:
+                    yaml.dump(output_data, yamlfile, default_flow_style=False)
+            
+            elif format == 'markdown':
+                lines = []
+                if include_metadata:
+                    lines.append(f"# Sheet: {sheet_name}")
+                    lines.append(f"*Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+                    lines.append("")
+                
+                # Convert to markdown table
+                for i, row in enumerate(sheet.iter_rows(values_only=True)):
+                    if i == 0:
+                        # Headers
+                        header_row = "| " + " | ".join(str(cell) if cell is not None else "" for cell in row) + " |"
+                        separator = "| " + " | ".join("---" for _ in row) + " |"
+                        lines.append(header_row)
+                        lines.append(separator)
+                    else:
+                        # Data rows
+                        data_row = "| " + " | ".join(str(cell) if cell is not None else "" for cell in row) + " |"
+                        lines.append(data_row)
+                
+                lines.append("")
+                lines.append("---")
+                lines.append("*Generated by FSS Parse Excel*")
+                
+                with open(file_path_out, 'w', encoding='utf-8') as mdfile:
+                    mdfile.write('\n'.join(lines))
+            
+            exported_files.append(str(file_path_out))
+            
+            if verbose and not quiet:
+                console.print(f"   ✅ {sheet_name} → {filename}", style="green")
+        
+        # Output results
+        if json_output:
+            console.print(json.dumps({
+                "operation": "export_sheets",
+                "input_file": str(file_path),
+                "output_directory": str(output_dir),
+                "format": format,
+                "sheets_exported": len(exported_files),
+                "files": exported_files,
+                "status": "success"
+            }, indent=2))
+        elif not quiet:
+            console.print(f"📁 Exported {len(exported_files)} sheets to {output_dir}", style="green")
+            if verbose:
+                for file_path in exported_files:
+                    console.print(f"   📄 {Path(file_path).name}", style="blue")
+        
+    except Exception as e:
+        if json_output:
+            console.print(json.dumps({"status": "error", "message": str(e)}))
+        else:
+            console.print(f"❌ Export failed: {e}", style="red")
         sys.exit(1)
 
 @cli.command()

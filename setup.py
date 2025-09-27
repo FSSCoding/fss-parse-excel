@@ -27,7 +27,7 @@ setup(
     author_email="development@example.com",
     url="https://github.com/FSSCoding/fss-parse-excel",
     
-    packages=find_packages(where="src"),
+    py_modules=["excel_engine", "cell_manager", "converters", "query_engine", "sheet_manager", "table_manager"],
     package_dir={"": "src"},
     
     entry_points={

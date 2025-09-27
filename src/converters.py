@@ -343,8 +343,15 @@ class ExcelReader:
         workbook_metadata.original_format = Path(file_path).suffix.lower()
         
         # Extract workbook-level metadata
-        workbook_metadata.defined_names = {dn.name: dn.value for dn in wb.defined_names.definedName}
-        workbook_metadata.custom_properties = dict(wb.custom_doc_props) if hasattr(wb, 'custom_doc_props') else {}
+        try:
+            workbook_metadata.defined_names = {name: str(obj.value) for name, obj in wb.defined_names.items()}
+        except AttributeError:
+            workbook_metadata.defined_names = {}
+        
+        try:
+            workbook_metadata.custom_properties = dict(wb.custom_doc_props) if hasattr(wb, 'custom_doc_props') else {}
+        except:
+            workbook_metadata.custom_properties = {}
         
         # Process each sheet
         for sheet_name in wb.sheetnames:
@@ -952,48 +959,113 @@ class ExcelWriter:
     
     def _write_markdown(self, sheets_data: Dict[str, pd.DataFrame], 
                         file_path: str, metadata: WorkbookMetadata = None) -> bool:
-        """Write to Markdown table format."""
+        """Write to Markdown table format with standardized FSS format."""
         try:
+            from datetime import datetime
+            import os
+            
+            # Extract filename for title
+            source_filename = metadata.original_format if metadata else "Unknown"
+            if hasattr(metadata, 'original_filename'):
+                source_filename = metadata.original_filename
+            else:
+                # Try to get from file_path or other context
+                source_filename = Path(file_path).stem + ".xlsx"
+            
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
             markdown_lines = []
             
-            # Add title if multiple sheets
-            if len(sheets_data) > 1:
-                markdown_lines.append("# Spreadsheet Data\n")
+            # Standardized header format
+            markdown_lines.append(f"# Excel Analysis: {source_filename}")
+            markdown_lines.append(f"*Generated on: {timestamp}*")
+            markdown_lines.append("")
+            
+            # Metadata section
+            if metadata:
+                total_rows = sum(len(df) for df in sheets_data.values())
+                total_cols = max((len(df.columns) for df in sheets_data.values()), default=0)
+                file_size = "Unknown"
+                
+                # Try to get file size if available
+                if hasattr(metadata, 'file_size'):
+                    file_size = metadata.file_size
+                elif hasattr(metadata, 'original_filename'):
+                    try:
+                        size_bytes = os.path.getsize(metadata.original_filename)
+                        file_size = f"{size_bytes / 1024:.1f} KB" if size_bytes < 1024*1024 else f"{size_bytes / (1024*1024):.1f} MB"
+                    except:
+                        pass
+                
+                markdown_lines.append("## Metadata")
+                markdown_lines.append(f"- **File Size:** {file_size}")
+                markdown_lines.append(f"- **Sheets:** {len(sheets_data)} ({', '.join(list(sheets_data.keys())[:3])}{', ...' if len(sheets_data) > 3 else ''})")
+                markdown_lines.append(f"- **Total Rows:** {total_rows:,}")
+                markdown_lines.append(f"- **Total Columns:** {total_cols}")
+                
+                if metadata.original_format:
+                    markdown_lines.append(f"- **Format:** {metadata.original_format.upper()}")
+                
+                markdown_lines.append("")
+            
+            # Content section
+            markdown_lines.append("## Content")
+            markdown_lines.append("")
             
             for sheet_name, df in sheets_data.items():
                 # Add sheet heading if multiple sheets or requested
                 if len(sheets_data) > 1 or self.config.md_include_sheet_names:
-                    markdown_lines.append(f"## {sheet_name}\n")
+                    markdown_lines.append(f"### Sheet: {sheet_name}")
+                    markdown_lines.append("")
                 
                 if df.empty:
-                    markdown_lines.append("*No data in this sheet*\n")
+                    markdown_lines.append("*No data in this sheet*")
+                    markdown_lines.append("")
                     continue
                 
+                # Show row count for large sheets
+                if len(df) > 20:
+                    markdown_lines.append(f"*Showing first 20 rows of {len(df):,} total rows*")
+                    markdown_lines.append("")
+                    display_df = df.head(20).copy()
+                else:
+                    display_df = df.copy()
+                
                 # Truncate long content for readability
-                display_df = df.copy()
                 for col in display_df.select_dtypes(include=['object']):
                     display_df[col] = display_df[col].astype(str).apply(
                         lambda x: x[:self.config.md_max_col_width] + '...' 
-                        if len(x) > self.config.md_max_col_width else x
+                        if len(str(x)) > self.config.md_max_col_width else str(x)
                     )
                 
-                # Convert DataFrame to markdown table
-                md_table = display_df.to_markdown(
-                    index=False,
-                    tablefmt='github',
-                    stralign=self.config.md_table_alignment
-                )
+                # Replace NaN and None values with empty strings for better markdown
+                display_df = display_df.fillna('')
                 
-                if md_table:
-                    markdown_lines.append(md_table)
-                    markdown_lines.append("\n")
+                try:
+                    # Convert DataFrame to markdown table
+                    md_table = display_df.to_markdown(
+                        index=False,
+                        tablefmt='github',
+                        stralign=self.config.md_table_alignment
+                    )
+                    
+                    if md_table:
+                        markdown_lines.append(md_table)
+                    else:
+                        markdown_lines.append("*Unable to render table data*")
+                except Exception as e:
+                    # Fallback to simple table format
+                    markdown_lines.append("| " + " | ".join(str(col) for col in display_df.columns) + " |")
+                    markdown_lines.append("| " + " | ".join("---" for _ in display_df.columns) + " |")
+                    
+                    for _, row in display_df.head(10).iterrows():
+                        markdown_lines.append("| " + " | ".join(str(val) for val in row) + " |")
+                
+                markdown_lines.append("")
             
-            # Add metadata if requested
-            if metadata and self.config.yaml_include_metadata:
-                markdown_lines.append("## Metadata\n")
-                markdown_lines.append("```yaml")
-                markdown_lines.append(yaml.dump(asdict(metadata), default_flow_style=False) if yaml else str(metadata))
-                markdown_lines.append("```\n")
+            # Standardized footer
+            markdown_lines.append("---")
+            markdown_lines.append("*Generated by FSS Parse Excel v1.0.0*")
             
             # Write markdown file
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -1003,6 +1075,8 @@ class ExcelWriter:
             
         except Exception as e:
             print(f"❌ Error writing Markdown: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
 
